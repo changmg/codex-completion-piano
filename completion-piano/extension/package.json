@@ -1,0 +1,62 @@
+{
+  "name": "codex-completion-piano",
+  "displayName": "Codex Completion Piano",
+  "description": "Play a gentle two-second piano phrase on Windows when remote Codex finishes or asks a question.",
+  "version": "0.1.4",
+  "publisher": "local-tools",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "extensionKind": [
+    "ui"
+  ],
+  "main": "./extension.js",
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "contributes": {
+    "commands": [
+      {
+        "command": "codexCompletionPiano.preview",
+        "title": "Codex: Preview Piano Notification"
+      },
+      {
+        "command": "codexCompletionPiano.diagnose",
+        "title": "Codex: Diagnose Piano Notification"
+      }
+    ],
+    "configuration": {
+      "title": "Codex Completion Piano",
+      "properties": {
+        "codexCompletionPiano.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Play the piano phrase when Codex finishes or asks a structured question on the connected machine."
+        },
+        "codexCompletionPiano.scope": {
+          "type": "string",
+          "enum": [
+            "machine",
+            "workspace"
+          ],
+          "default": "machine",
+          "description": "Play for all working directories on the connected machine, or only the open workspace."
+        },
+        "codexCompletionPiano.markerPaths": {
+          "type": "object",
+          "default": {},
+          "scope": "machine",
+          "additionalProperties": {
+            "type": "string",
+            "pattern": "^/"
+          },
+          "description": "Map VS Code remote authorities to absolute completion marker paths. Unlisted machines use the path embedded by the installer."
+        }
+      }
+    }
+  }
+}

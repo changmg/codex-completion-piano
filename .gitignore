@@ -1,0 +1,10 @@
+__pycache__/
+*.py[cod]
+*.vsix
+dist/
+.venv/
+.pytest_cache/
+last-completion.json
+playback.log
+completion-piano-backup-*/
+.completion-piano-install-*/
