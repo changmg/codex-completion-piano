@@ -9,7 +9,16 @@ const vm = require('node:vm');
 
 const sourceFile = path.join(__dirname, '../completion-piano/extension/extension.js');
 const markerPath = '/remote/user/.codex/completion-piano/last-completion.json';
-const authority = 'ssh-remote+test-server';
+const connections = [
+  { remoteName: 'wsl', authority: 'wsl+Ubuntu-20.04' },
+  { remoteName: 'ssh-remote', authority: 'ssh-remote+test-server' },
+];
+
+function connectionTest(name, run) {
+  for (const connection of connections) {
+    test(`${connection.remoteName}: ${name}`, t => run(t, connection));
+  }
+}
 
 function uri(remote, file) {
   return { scheme: 'vscode-remote', authority: remote, path: file,
@@ -17,6 +26,7 @@ function uri(remote, file) {
 }
 
 async function createPlayer(t, options = {}) {
+  const { authority, remoteName } = options;
   const directory = options.storage || await fs.mkdtemp(path.join(os.tmpdir(), 'piano-player-'));
   if (!options.storage) t.after(() => fs.rm(directory, { recursive: true, force: true }));
   const state = {
@@ -29,7 +39,7 @@ async function createPlayer(t, options = {}) {
   const folders = [{ uri: uri(authority, '/project') }];
   const vscode = {
     Uri: { from: value => uri(value.authority, value.path) },
-    env: { remoteName: 'ssh-remote' },
+    env: { remoteName },
     window: {
       createOutputChannel: () => ({ appendLine: line => state.logs.push(line), dispose() {} }),
       showErrorMessage: message => state.errors.push(message),
@@ -94,9 +104,14 @@ function event(id, cwd = '/project') {
   return { id, type: 'agent-turn-complete', cwd };
 }
 
-test('startup baseline is silent, a new marker plays once on Windows', async t => {
-  const player = await createPlayer(t);
+connectionTest('startup baseline is silent, a new marker plays once on Windows', async (t, connection) => {
+  const player = await createPlayer(t, connection);
   assert.equal(player.plays.length, 0);
+  const report = await player.settle();
+  assert.equal(report.platform, 'win32');
+  assert.equal(report.remoteName, connection.remoteName);
+  assert.equal(report.signals[0].uri, `vscode-remote://${connection.authority}${markerPath}`);
+  assert.ok(player.reads.every(signal => signal.authority === connection.authority && signal.path === markerPath));
   player.event = event('new');
   await player.tick();
   await player.tick();
@@ -107,15 +122,15 @@ test('startup baseline is silent, a new marker plays once on Windows', async t =
   assert.ok(!player.plays[0].arguments_.join(' ').includes('Windows path with'));
 });
 
-test('a marker created after the initial missing file plays', async t => {
-  const player = await createPlayer(t, { event: null });
+connectionTest('a marker created after the initial missing file plays', async (t, connection) => {
+  const player = await createPlayer(t, { ...connection, event: null });
   player.event = event('first');
   await player.tick();
   assert.equal(player.plays.length, 1);
 });
 
-test('machine scope accepts jobs elsewhere; workspace scope honors folder boundaries', async t => {
-  const player = await createPlayer(t);
+connectionTest('machine scope accepts jobs elsewhere; workspace scope honors folder boundaries', async (t, connection) => {
+  const player = await createPlayer(t, connection);
   player.event = event('machine', '/other/project');
   await player.tick();
   player.settings.scope = 'workspace';
@@ -127,8 +142,8 @@ test('machine scope accepts jobs elsewhere; workspace scope honors folder bounda
   assert.equal(player.plays.length, 2);
 });
 
-test('disabled playback, malformed data, unknown events, and oversized markers are silent', async t => {
-  const player = await createPlayer(t);
+connectionTest('disabled playback, malformed data, unknown events, and oversized markers are silent', async (t, connection) => {
+  const player = await createPlayer(t, connection);
   player.settings.enabled = false;
   player.event = event('disabled');
   await player.tick();
@@ -143,34 +158,35 @@ test('disabled playback, malformed data, unknown events, and oversized markers a
   assert.equal(player.plays.length, 1);
 });
 
-test('windows sharing profile storage claim a host event only once', async t => {
+connectionTest('windows sharing profile storage claim a host event only once', async (t, connection) => {
   const storage = await fs.mkdtemp(path.join(os.tmpdir(), 'piano-shared-'));
   t.after(() => fs.rm(storage, { recursive: true, force: true }));
-  const one = await createPlayer(t, { storage });
-  const two = await createPlayer(t, { storage });
+  const one = await createPlayer(t, { ...connection, storage });
+  const two = await createPlayer(t, { ...connection, storage });
   one.event = event('shared-event');
   two.event = one.event;
   await Promise.all([one.tick(), two.tick()]);
   assert.equal(one.plays.length + two.plays.length, 1);
-  const reloaded = await createPlayer(t, { storage, event: one.event });
+  const reloaded = await createPlayer(t, { ...connection, storage, event: one.event });
   await reloaded.tick();
   assert.equal(reloaded.plays.length, 0);
 });
 
-test('per-host paths override the embedded path and diagnostics expose them', async t => {
+connectionTest('per-host paths override the embedded path and diagnostics expose them', async (t, connection) => {
+  const { authority } = connection;
   const custom = '/srv/custom Codex/completion-piano/last-completion.json';
-  const player = await createPlayer(t, { settings: { markerPaths: { [authority]: custom } } });
+  const player = await createPlayer(t, { ...connection, settings: { markerPaths: { [authority]: custom } } });
   const report = await player.settle();
   assert.equal(report.signals[0].authority, authority);
   assert.equal(report.signals[0].uri, `vscode-remote://${authority}${custom}`);
   assert.ok(player.reads.every(signal => signal.path === custom));
 });
 
-test('disconnect errors do not replay an old marker and new events recover', async t => {
-  const player = await createPlayer(t);
+connectionTest('disconnect errors do not replay an old marker and new events recover', async (t, connection) => {
+  const player = await createPlayer(t, connection);
   player.event = event('before-disconnect');
   await player.tick();
-  player.failure = new Error('SSH disconnected');
+  player.failure = new Error('Remote connection disconnected');
   await player.tick();
   await player.tick();
   assert.equal(player.logs.filter(line => line.includes('Cannot process')).length, 1);
@@ -182,14 +198,35 @@ test('disconnect errors do not replay an old marker and new events recover', asy
   assert.equal(player.plays.length, 2);
 });
 
-test('preview exposes playback failure and Linux reports the required Windows installation', async t => {
-  const failed = await createPlayer(t, { playbackError: new Error('Audio unavailable') });
+connectionTest('preview exposes playback failure and Linux reports the required Windows installation', async (t, connection) => {
+  const failed = await createPlayer(t, { ...connection, playbackError: new Error('Audio unavailable') });
   assert.equal(await failed.commands['codexCompletionPiano.preview'](), false);
   assert.ok(failed.errors.some(message => message.includes('playback failed')));
-  const linux = await createPlayer(t, { platform: 'linux' });
+  const linux = await createPlayer(t, { ...connection, platform: 'linux' });
   assert.equal(await linux.commands['codexCompletionPiano.preview'](), false);
   assert.ok(linux.errors.some(message => message.includes('locally in Windows')));
   assert.equal(linux.plays.length, 0);
   linux.dispose();
   assert.equal(linux.timerCleared, true);
+});
+
+test('WSL distributions and SSH hosts keep separate marker mappings and playback receipts', async t => {
+  const storage = await fs.mkdtemp(path.join(os.tmpdir(), 'piano-multiple-hosts-'));
+  t.after(() => fs.rm(storage, { recursive: true, force: true }));
+  const hosts = [...connections, { remoteName: 'wsl', authority: 'wsl+Ubuntu-24.04' }];
+  // Different WSL distributions often use identical Linux paths.
+  const markerPaths = Object.fromEntries(hosts.map(host => [
+    host.authority, `/srv/${host.remoteName} Codex home/completion-piano/last-completion.json`,
+  ]));
+  const players = await Promise.all(hosts.map(connection => createPlayer(t, {
+    ...connection, storage, settings: { markerPaths },
+  })));
+  for (const player of players) player.event = event('same-id-on-different-hosts');
+  await Promise.all(players.map(player => player.tick()));
+  for (const [index, player] of players.entries()) {
+    const { authority } = hosts[index];
+    assert.equal(player.plays.length, 1);
+    assert.ok(player.reads.every(signal =>
+      signal.authority === authority && signal.path === markerPaths[authority]));
+  }
 });

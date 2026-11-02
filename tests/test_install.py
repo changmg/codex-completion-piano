@@ -1,6 +1,7 @@
 import copy
 import hashlib
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
@@ -211,6 +212,84 @@ class InstallerTests(unittest.TestCase):
         self.assertIn("nothing written", result.stdout)
         self.assertFalse(self.directory.exists())
         self.assertEqual(snapshot(ROOT), before)
+
+    def test_wsl_dry_run_shows_windows_vsix_path_without_writing(self):
+        vsix = self.directory / "completion-piano/codex-completion-piano-0.1.4.vsix"
+        windows_vsix = "\\\\wsl.localhost\\Test-Distro\\Codex home ' $ with spaces\\completion-piano\\piano.vsix"
+        before = snapshot(ROOT)
+        with mock.patch.dict(os.environ, {"WSL_DISTRO_NAME": "Test-Distro"}), mock.patch.object(
+                install.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, windows_vsix + "\n")) as convert, \
+                mock.patch.object(sys, "stdout", io.StringIO()) as output:
+            self.assertEqual(install.main(["--dry-run", "--codex-dir", str(self.directory)]), 0)
+        text = output.getvalue()
+        self.assertIn("Player connection: WSL (Test-Distro)", text)
+        self.assertIn("VSIX (Linux): {}".format(vsix), text)
+        self.assertIn("VSIX (Windows): {}".format(windows_vsix), text)
+        self.assertIn("WSL: Connect to WSL using Distro...", text)
+        self.assertIn("nothing written", text)
+        self.assertNotIn("Remote SSH", text)
+        self.assertNotIn("Download", text)
+        convert.assert_called_once_with(
+            ["wslpath", "-w", str(vsix)], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            text=True, check=True, timeout=5,
+        )
+        self.assertFalse(self.directory.exists())
+        self.assertEqual(snapshot(ROOT), before)
+
+    def test_wsl_guidance_falls_back_when_windows_path_conversion_is_unavailable(self):
+        outcomes = [FileNotFoundError("wslpath"), subprocess.CalledProcessError(1, "wslpath"),
+                    subprocess.TimeoutExpired("wslpath", 5), None]
+        for outcome in outcomes:
+            with self.subTest(outcome=outcome), mock.patch.dict(os.environ, {"WSL_DISTRO_NAME": "Test-Distro"}), \
+                    mock.patch.object(install.subprocess, "run") as convert, \
+                    mock.patch.object(sys, "stdout", io.StringIO()) as output:
+                if outcome is None:
+                    convert.return_value = subprocess.CompletedProcess([], 0, "\n")
+                else:
+                    convert.side_effect = outcome
+                self.assertEqual(install.main(["--dry-run", "--codex-dir", str(self.directory)]), 0)
+                text = output.getvalue()
+                self.assertIn(str(self.directory / "completion-piano/codex-completion-piano-0.1.4.vsix"), text)
+                self.assertIn("Windows path conversion unavailable", text)
+                self.assertIn("\\\\wsl.localhost\\Test-Distro", text)
+                self.assertIn("Browse from the distribution root", text)
+                self.assertIn("Browse to the VSIX through the WSL share", text)
+                self.assertNotIn("VSIX (Windows):", text)
+                self.assertFalse(self.directory.exists())
+
+    def test_non_wsl_guidance_keeps_ssh_flow_without_path_conversion(self):
+        with mock.patch.dict(os.environ, {"WSL_DISTRO_NAME": ""}), \
+                mock.patch.object(install.subprocess, "run") as convert, \
+                mock.patch.object(sys, "stdout", io.StringIO()) as output:
+            self.assertEqual(install.main(["--dry-run", "--codex-dir", str(self.directory)]), 0)
+        text = output.getvalue()
+        self.assertIn("Player connection: Remote SSH", text)
+        self.assertIn("Download the VSIX", text)
+        self.assertIn("scp", text)
+        self.assertIn("reconnect with Remote SSH", text)
+        self.assertNotIn("WSL:", text)
+        convert.assert_not_called()
+        self.assertFalse(self.directory.exists())
+
+    def test_wsl_install_keeps_linux_configuration_and_embedded_marker_path(self):
+        windows_vsix = "\\\\wsl.localhost\\Test-Distro\\tmp\\piano.vsix"
+        with mock.patch.dict(os.environ, {"WSL_DISTRO_NAME": "Test-Distro"}), mock.patch.object(
+                install.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, windows_vsix)), \
+                mock.patch.object(sys, "stdout", io.StringIO()) as output:
+            self.assertEqual(install.main(["--codex-dir", str(self.directory)]), 0)
+        text = output.getvalue()
+        self.assertIn("Installed.", text)
+        self.assertIn("VSIX (Windows): {}".format(windows_vsix), text)
+        config = self.read_config()
+        self.assertEqual(config["notify"], [sys.executable, str(self.directory / "notify-rhythm.py")])
+        hooks = json.loads((self.directory / "hooks.json").read_text())
+        command = hooks["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+        self.assertEqual(shlex.split(command), [sys.executable, str(self.directory / "notify-question.py")])
+        vsix = self.directory / "completion-piano/codex-completion-piano-0.1.4.vsix"
+        with zipfile.ZipFile(vsix) as archive:
+            script = archive.read("extension/extension.js").decode()
+            self.assertIn(json.dumps(str(self.directory / "completion-piano/last-completion.json")), script)
+            self.assertNotIn(windows_vsix, script)
 
     def test_symlinks_and_installing_inside_repository_are_rejected(self):
         self.directory.mkdir()

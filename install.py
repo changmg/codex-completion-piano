@@ -11,6 +11,7 @@ from pathlib import Path
 import shlex
 import shutil
 import stat
+import subprocess
 import sys
 import tempfile
 
@@ -262,6 +263,49 @@ def show_plan(plan):
     print("Question command: {}".format(plan.question_group["hooks"][0]["command"]))
 
 
+def show_next_steps(plan, vsix=None):
+    """Print setup steps, converting only the VSIX display path for WSL."""
+    if vsix is None:
+        manifest = ROOT / "completion-piano" / "extension" / "package.json"
+        metadata = json.loads(manifest.read_text(encoding="utf-8"))
+        vsix = plan.directory / "completion-piano" / "{}-{}.vsix".format(metadata["name"], metadata["version"])
+    distro = os.environ.get("WSL_DISTRO_NAME")
+    print("\nPlayer connection: {}".format("WSL ({})".format(distro) if distro else "Remote SSH"))
+    print("VSIX (Linux): {}".format(vsix))
+    windows_path = None
+    if distro:
+        try:
+            result = subprocess.run(
+                ["wslpath", "-w", str(vsix)], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                text=True, check=True, timeout=5,
+            )
+            windows_path = result.stdout.strip() or None
+        except (OSError, subprocess.SubprocessError):
+            pass
+        if windows_path:
+            print("VSIX (Windows): {}".format(windows_path))
+        else:
+            print("Windows path conversion unavailable. In Windows Explorer, open:")
+            print("   " + "\\\\wsl.localhost\\" + distro)
+            print("   Browse from the distribution root to the Linux VSIX path above.")
+
+    location = "WSL" if distro else "Linux"
+    print("\n1. Restart Codex in {}, run /hooks, and review/trust the piano question hook.".format(location))
+    if distro:
+        print("2. In a LOCAL Windows VS Code window, run Extensions: Install from VSIX...")
+        print("   Select the Windows VSIX path above." if windows_path else
+              "   Browse to the VSIX through the WSL share above.")
+        print("3. Run WSL: Connect to WSL using Distro... and select {}.".format(distro))
+        print("   Reload VS Code and restart Codex in WSL.")
+    else:
+        print("2. Download the VSIX using VS Code Explorer's Download action or scp.")
+        print("3. In a LOCAL Windows VS Code window, run Extensions: Install from VSIX...")
+        print("   Install the downloaded file locally, then reconnect with Remote SSH and reload VS Code.")
+    print("4. Run Codex: Preview Piano Notification in the Command Palette, then run in {}:".format(location))
+    print("   {}".format(shlex.join([sys.executable, str(plan.directory / "notify-rhythm.py"), "--test"])))
+    print("\nDocumentation: {}".format(plan.directory / "completion-piano" / "README.md"))
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--codex-dir", type=Path, metavar="PATH", help="destination (default: CODEX_HOME, then ~/.codex)")
@@ -274,20 +318,14 @@ def main(argv=None):
         plan = prepare(resolve_codex_dir(args.codex_dir), args.replace_notify)
         show_plan(plan)
         if args.dry_run:
-            print("Dry run: nothing written.")
+            show_next_steps(plan)
+            print("\nDry run: nothing written. Follow the setup steps after installation.")
             return 0
         vsix, backup = install(plan)
     except Exception as error:
         parser.exit(1, "Installation failed: {}\n".format(error))
     print("\nInstalled. Existing files were backed up in: {}".format(backup or "(fresh installation)"))
-    print("\n1. Restart Codex on Linux, run /hooks, and review/trust the piano question hook.")
-    print("2. Download this file using VS Code Explorer's Download action or scp:")
-    print("   {}".format(vsix))
-    print("3. In a LOCAL Windows VS Code window, run Extensions: Install from VSIX...")
-    print("   Install the downloaded file locally, then reconnect with Remote SSH and reload VS Code.")
-    print("4. Run Codex: Preview Piano Notification in the Command Palette, then run on Linux:")
-    print("   {}".format(shlex.join([sys.executable, str(plan.directory / "notify-rhythm.py"), "--test"])))
-    print("\nDocumentation: {}".format(plan.directory / "completion-piano" / "README.md"))
+    show_next_steps(plan, vsix)
     return 0
 
 
