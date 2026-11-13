@@ -4,7 +4,9 @@ Play the existing two-second piano phrase on your **Windows 11 computer** when
 Codex running in **WSL** finishes a turn or asks a structured question. This
 repository packages the working Codex Completion Piano setup as an offline
 installer for Windows VS Code with the WSL extension. Remote Linux machines
-connected through VS Code Remote SSH are also supported.
+connected through VS Code Remote SSH are also supported. Claude Code CLI
+sessions in WSL can play the same piano through the same player; see
+[Claude Code CLI in WSL](#claude-code-cli-in-wsl).
 
 The Linux helpers write a small marker. A VS Code extension installed locally
 on Windows reads it through the existing WSL or SSH connection and plays the
@@ -21,6 +23,8 @@ packages, daemon, or additional network port.
   extension and a working SSH connection from Windows VS Code.
 - For questions: Codex must support `PreToolUse` hooks and the
   `request_user_input` / `request_user_input_async` tools.
+- For Claude Code: a current Claude Code CLI in WSL (tested with 2.1.323)
+  that supports the `Stop`, `StopFailure`, and `PreToolUse` hooks.
 
 At least one Windows VS Code window must stay connected to the WSL distribution
 or SSH host. Codex may run in its IDE extension or a terminal using the same
@@ -190,6 +194,64 @@ same WSL distribution or SSH host in the same profile. A new marker should play
 once. Repeated reads and reloading with an old marker should stay silent.
 Disconnect and reconnect, then write a new marker; playback should resume.
 
+## Claude Code CLI in WSL
+
+Claude Code sessions play the same piano when a turn ends or Claude asks you
+something. `install-claude.py` adds three hooks to Claude Code's user
+`settings.json`, each running `notify-claude.py`:
+
+| Hook | Plays when |
+| --- | --- |
+| `Stop` | Claude finishes responding (not after you interrupt with Esc) |
+| `StopFailure` | a turn ends on an API error, such as a rate limit |
+| `PreToolUse` matching `AskUserQuestion\|ExitPlanMode` | Claude asks a multiple-choice question or presents a plan for approval |
+
+Permission prompts, subagents, and headless `claude -p` or SDK runs stay silent.
+As with Codex, only a generated ID and the working directory reach Windows;
+prompts, answers, plans, and Claude's replies are never forwarded.
+
+Run as the same Linux user who runs Claude Code, without `sudo`:
+
+```bash
+cd /path/to/codex-completion-piano
+python3 install-claude.py --dry-run
+python3 install-claude.py
+```
+
+The installer selects `--claude-dir`, then `CLAUDE_CONFIG_DIR`, then `~/.claude`,
+and chooses a player:
+
+- **Shared:** when the Codex piano is installed (`--codex-dir`, then
+  `CODEX_HOME`, then `~/.codex` holds `notify-rhythm.py` and
+  `completion-piano/`), Claude writes the same marker. The Windows player
+  already reads it, so nothing changes on Windows, including other PCs that
+  connect to this machine through VS Code.
+- **Standalone:** otherwise, the installer adds `notify-rhythm.py` and
+  `completion-piano/` to the Claude directory and builds a VSIX for that marker.
+  Install it on Windows as in [Install the player locally on
+  Windows](#install-the-player-locally-on-windows). If you install the Codex
+  piano later, run `install-claude.py` again to move Claude to the shared player.
+
+Other settings and hooks keep their values and order, and a repeated
+installation updates the piano hooks in place. Replaced files are backed up
+under `completion-piano-backup-*` in the Claude directory. Symlinked
+destinations, malformed settings, `disableAllHooks`, and managed settings that
+allow only managed hooks stop the installation before files change. Existing
+`Stop` hooks are listed but kept; remove any that also play a sound.
+
+Claude Code reloads `settings.json` by itself and has no hook trust step;
+restart open sessions if the piano stays silent. With a VS Code window
+connected to WSL, run the test command the installer prints, for example:
+
+```bash
+printf '%s' '{"hook_event_name": "Stop"}' | python3 ~/.claude/notify-claude.py ~/.codex/notify-rhythm.py
+```
+
+Then, in a Claude Code session, ask for a short reply, ask Claude to ask you a
+multiple-choice question, and approve a plan in plan mode; each should play.
+Claude Code sessions with no VS Code window connected to the distribution are
+silent, as with Codex.
+
 ## Settings, multiple distributions, and SSH hosts
 
 - `codexCompletionPiano.enabled`: mute or enable playback (default `true`).
@@ -261,7 +323,8 @@ node tests/player.test.js
 
 Node 18+ is needed for the development tests only. The automated tests exercise
 WSL and SSH authorities, marker routing, scope, duplicate suppression, reconnects,
-and installer guidance. They simulate the VS Code filesystem and Windows
+installer guidance, and the Claude Code installer and hook, including running the
+configured hook command through a shell. They simulate the VS Code filesystem and Windows
 playback boundary. A real audio check uses the manual acceptance steps above.
 
 ## Remove or roll back
@@ -278,6 +341,12 @@ were replaced; remove newly created piano files separately. Restore whole
 configuration files only after checking for changes made since installation.
 Backups can contain private Codex configuration and stay outside this repository.
 
+For Claude Code, remove the three hook entries that run `notify-claude.py` from
+`settings.json`, then remove `notify-claude.py` from the Claude directory (and,
+for a standalone player, `notify-rhythm.py` and `completion-piano/`). The
+installer's `completion-piano-backup-*` directory holds the previous
+`settings.json`.
+
 ## Sources and license
 
 The player and WAV are derived from the existing Codex Completion Piano 0.1.3
@@ -288,5 +357,6 @@ in [vendor/README.md](vendor/README.md).
 
 - [Codex notification configuration](https://learn.chatgpt.com/docs/config-file/config-advanced#notifications)
 - [Codex lifecycle hooks and trust](https://learn.chatgpt.com/docs/hooks)
+- [Claude Code hooks](https://code.claude.com/docs/en/hooks)
 - [VS Code WSL](https://code.visualstudio.com/docs/remote/wsl)
 - [VS Code Remote SSH](https://code.visualstudio.com/docs/remote/ssh)

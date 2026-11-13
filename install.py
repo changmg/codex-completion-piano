@@ -208,32 +208,48 @@ def commit_replacements(replacements, backup):
         raise
 
 
+def stage_helper(stage, directory, name):
+    """Stage an executable copy of a repository helper for directory."""
+    shutil.copy2(ROOT / name, stage / name)
+    (stage / name).chmod(0o755)
+    return stage / name, directory / name
+
+
+def stage_player(stage, directory):
+    """Stage completion-piano/ with a VSIX for directory's marker, plus the marker writer."""
+    project = stage / "completion-piano"
+    extension = project / "extension"
+    extension.mkdir(parents=True)
+    for name in EXTENSION_FILES:
+        shutil.copy2(ROOT / "completion-piano" / "extension" / name, extension / name)
+    shutil.copy2(ROOT / "completion-piano" / "build.py", project / "build.py")
+    shutil.copy2(ROOT / "README.md", project / "README.md")
+    spec = importlib.util.spec_from_file_location("piano_build", ROOT / "completion-piano" / "build.py")
+    builder = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(builder)
+    vsix = builder.package(str(directory / "completion-piano" / "last-completion.json"), project, extension)
+    replacements = [(project, directory / "completion-piano"), stage_helper(stage, directory, "notify-rhythm.py")]
+    return replacements, directory / "completion-piano" / vsix.name
+
+
+def keep_marker(stage, directory):
+    """Carry the last marker into the staged player so an update does not replay it."""
+    marker = directory / "completion-piano" / "last-completion.json"
+    if marker.is_file():
+        shutil.copy2(marker, stage / "completion-piano" / marker.name)
+
+
 def install(plan):
     directory = plan.directory
     directory.mkdir(parents=True, mode=0o700, exist_ok=True)
     backup = None
     with tempfile.TemporaryDirectory(prefix=".completion-piano-install-", dir=str(directory)) as temporary:
         stage = Path(temporary)
-        project = stage / "completion-piano"
-        extension = project / "extension"
-        extension.mkdir(parents=True)
-        for name in EXTENSION_FILES:
-            shutil.copy2(ROOT / "completion-piano" / "extension" / name, extension / name)
-        shutil.copy2(ROOT / "completion-piano" / "build.py", project / "build.py")
-        shutil.copy2(ROOT / "README.md", project / "README.md")
-        (project / "question-hooks.json").write_text(
+        replacements, vsix = stage_player(stage, directory)
+        (stage / "completion-piano" / "question-hooks.json").write_text(
             json.dumps({"hooks": {"PreToolUse": [plan.question_group]}}, indent=2) + "\n", encoding="utf-8"
         )
-        spec = importlib.util.spec_from_file_location("piano_build", ROOT / "completion-piano" / "build.py")
-        builder = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(builder)
-        vsix = builder.package(str(directory / "completion-piano" / "last-completion.json"), project, extension)
-
-        replacements = [(project, directory / "completion-piano")]
-        for name in ("notify-rhythm.py", "notify-question.py"):
-            shutil.copy2(ROOT / name, stage / name)
-            (stage / name).chmod(0o755)
-            replacements.append((stage / name, directory / name))
+        replacements.append(stage_helper(stage, directory, "notify-question.py"))
         for name, content in plan.updates.items():
             staged = stage / name
             staged.write_bytes(content)
@@ -244,14 +260,11 @@ def install(plan):
         for name, content in plan.original.items():
             if (directory / name).is_symlink() or read_optional(directory / name) != content:
                 raise ValueError("{} changed during installation; retry when configuration editing is finished.".format(name))
-        # Preserve the last marker so updating the helpers does not replay it.
-        marker = directory / "completion-piano" / "last-completion.json"
-        if marker.is_file():
-            shutil.copy2(marker, project / marker.name)
+        keep_marker(stage, directory)
         if any(target.exists() for _, target in replacements):
             backup = Path(tempfile.mkdtemp(prefix="completion-piano-backup-", dir=str(directory)))
         commit_replacements(replacements, backup)
-    return directory / "completion-piano" / vsix.name, backup
+    return vsix, backup
 
 
 def show_plan(plan):
@@ -263,37 +276,55 @@ def show_plan(plan):
     print("Question command: {}".format(plan.question_group["hooks"][0]["command"]))
 
 
+def default_vsix(directory):
+    manifest = ROOT / "completion-piano" / "extension" / "package.json"
+    metadata = json.loads(manifest.read_text(encoding="utf-8"))
+    return directory / "completion-piano" / "{}-{}.vsix".format(metadata["name"], metadata["version"])
+
+
+def windows_path(path):
+    """Return the Windows form of a WSL path, or None outside WSL or when conversion fails."""
+    if not os.environ.get("WSL_DISTRO_NAME"):
+        return None
+    try:
+        result = subprocess.run(
+            ["wslpath", "-w", str(path)], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            text=True, check=True, timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return result.stdout.strip() or None
+
+
+def show_vsix_location(vsix):
+    """Print where Windows finds the VSIX; return whether a Windows path was printed."""
+    distro = os.environ.get("WSL_DISTRO_NAME")
+    print("VSIX (Linux): {}".format(vsix))
+    if not distro:
+        return False
+    converted = windows_path(vsix)
+    if converted:
+        print("VSIX (Windows): {}".format(converted))
+    else:
+        print("Windows path conversion unavailable. In Windows Explorer, open:")
+        print("   " + "\\\\wsl.localhost\\" + distro)
+        print("   Browse from the distribution root to the Linux VSIX path above.")
+    return bool(converted)
+
+
 def show_next_steps(plan, vsix=None):
     """Print setup steps, converting only the VSIX display path for WSL."""
     if vsix is None:
-        manifest = ROOT / "completion-piano" / "extension" / "package.json"
-        metadata = json.loads(manifest.read_text(encoding="utf-8"))
-        vsix = plan.directory / "completion-piano" / "{}-{}.vsix".format(metadata["name"], metadata["version"])
+        vsix = default_vsix(plan.directory)
     distro = os.environ.get("WSL_DISTRO_NAME")
     print("\nPlayer connection: {}".format("WSL ({})".format(distro) if distro else "Remote SSH"))
-    print("VSIX (Linux): {}".format(vsix))
-    windows_path = None
-    if distro:
-        try:
-            result = subprocess.run(
-                ["wslpath", "-w", str(vsix)], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                text=True, check=True, timeout=5,
-            )
-            windows_path = result.stdout.strip() or None
-        except (OSError, subprocess.SubprocessError):
-            pass
-        if windows_path:
-            print("VSIX (Windows): {}".format(windows_path))
-        else:
-            print("Windows path conversion unavailable. In Windows Explorer, open:")
-            print("   " + "\\\\wsl.localhost\\" + distro)
-            print("   Browse from the distribution root to the Linux VSIX path above.")
+    converted = show_vsix_location(vsix)
 
     location = "WSL" if distro else "Linux"
     print("\n1. Restart Codex in {}, run /hooks, and review/trust the piano question hook.".format(location))
     if distro:
         print("2. In a LOCAL Windows VS Code window, run Extensions: Install from VSIX...")
-        print("   Select the Windows VSIX path above." if windows_path else
+        print("   Select the Windows VSIX path above." if converted else
               "   Browse to the VSIX through the WSL share above.")
         print("3. Run WSL: Connect to WSL using Distro... and select {}.".format(distro))
         print("   Reload VS Code and restart Codex in WSL.")
